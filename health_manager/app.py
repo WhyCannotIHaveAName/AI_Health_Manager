@@ -4,6 +4,7 @@ import os
 import queue
 import sys
 import threading
+import webbrowser
 import tkinter as tk
 from datetime import date, timedelta
 from pathlib import Path
@@ -13,6 +14,7 @@ from . import __version__
 from . import ai
 from .domain import KINDS, LABELS, NUTRIENTS, number, totals
 from .nutrition import Catalog
+from .products import Products
 from .secrets import load_key, save_key
 from .store import Store
 
@@ -48,6 +50,7 @@ class App(ctk.CTk):
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self.store = Store(self.data_dir / "health.db")
         self.catalog = Catalog(resource_dir())
+        self.products = Products()
         self.key_error = ""
         try:
             self.key = load_key(self.data_dir / "api.secret")
@@ -154,7 +157,7 @@ class App(ctk.CTk):
             messagebox.showinfo("正在处理", "请等待当前 AI 请求完成。", parent=self)
             return
         self.busy = True
-        self.status.configure(text="正在连接 DeepSeek…（最长约 75 秒，可继续浏览记录）")
+        self.status.configure(text="正在分析与查找数据…（可能需要多次请求，可继续浏览记录）")
         def run():
             try:
                 self.events.put((done, work(), None))
@@ -312,30 +315,37 @@ class App(ctk.CTk):
         self.button(bar, "选择照片", self.pick_image, True, width=110).pack(side="left", padx=(0, 8))
         if self.meal_image:
             self.button(bar, "移除照片", self.remove_image, True, width=100).pack(side="left", padx=(0, 8))
-        self.button(bar, "发送给 DeepSeek 识别", self.identify, width=200).pack(side="left")
-        self.label(form, "点击识别将发送本餐文字和所选照片，按你的 API 账户计费。照片不保存到记录中。", 11, MUTED, wraplength=700).pack(anchor="w", padx=20, pady=(0, 18))
+        self.button(bar, "识别并计算营养", self.identify, width=200).pack(side="left")
+        self.label(form, "文字/照片发送 DeepSeek 分析；品牌或条码用于查询 Open Food Facts 公开标签。按 API 账户计费，照片不保存在记录中。", 11, MUTED, wraplength=700).pack(anchor="w", padx=20, pady=(0, 18))
         self.label(self.body, "核对食物与份量", 18, bold=True).pack(anchor="w", pady=(6, 4))
-        self.label(self.body, "营养值来自数据库或你填写的包装标签；份量范围仅反映重量估计。", 12, MUTED).pack(anchor="w", pady=(0, 10))
+        self.label(self.body, "数据库与商品标签优先；查不到时智能估算。范围同时考虑份量和估算配方差异。", 12, MUTED, wraplength=710).pack(anchor="w", pady=(0, 10))
         if self.meal_notes:
             self.label(self.body, self.meal_notes, 13, MUTED, wraplength=700).pack(anchor="w", pady=(0, 10))
         for idx, item in enumerate(self.draft):
             tile = self.card(self.body)
             tile.pack(fill="x", pady=(0, 8))
-            text = f"{item['name']}  ·  {item['grams']:g} g  [{item['grams_low']:g}–{item['grams_high']:g} g]"
+            unit = item.get("unit", "g")
+            text = f"{item['name']}  ·  {item['grams']:g} {unit}  [{item['grams_low']:g}–{item['grams_high']:g} {unit}]"
             self.label(tile, text, 14, bold=True, wraplength=600).pack(anchor="w", padx=16, pady=(12, 3))
             self.label(tile, item["source"] + "  |  " + item["confidence"], 11, MUTED, wraplength=620).pack(anchor="w", padx=16)
+            if item.get("estimate_reason"):
+                self.label(tile, item["estimate_reason"], 11, MUTED, wraplength=620).pack(anchor="w", padx=16)
             if item.get("per100") and item["per100"].get("kcal") is not None:
                 self.label(tile, f"约 {item['per100']['kcal'] * item['grams'] / 100:.0f} kcal", 12, TEAL).pack(anchor="w", padx=16, pady=3)
             tools = ctk.CTkFrame(tile, fg_color="transparent")
             tools.pack(anchor="w", padx=16, pady=(6, 12))
             self.button(tools, "修改 / 匹配", lambda i=idx: self.item_dialog(i), True, width=110).pack(side="left", padx=(0, 8))
             self.button(tools, "移除", lambda i=idx: self.remove_item(i), True, width=70).pack(side="left")
+            if item.get("source_url"):
+                self.button(tools, "查看来源", lambda u=item["source_url"]: webbrowser.open(u), True, width=90).pack(side="left", padx=8)
         if self.draft:
             self.label(self.body, self.nutrition_text(self.draft), 13, TEAL, wraplength=710).pack(anchor="w", pady=12)
         buttons = ctk.CTkFrame(self.body, fg_color="transparent")
         buttons.pack(fill="x", pady=12)
         self.button(buttons, "+ 手动添加食物", self.item_dialog, True, width=160).pack(side="left", padx=(0, 10))
         self.button(buttons, "确认并保存这一餐", self.save_meal, width=180).pack(side="left", padx=(0, 10))
+        if self.draft and any(not i.get("per100") or any(i["per100"].get(n) is None for n in ("kcal", "protein", "fat", "carbs")) for i in self.draft):
+            self.button(buttons, "补算缺失营养", self.fill_nutrition, True, width=140).pack(side="left", padx=(0, 10))
         self.button(buttons, "新的一餐", self.new_meal, True, width=100).pack(side="left")
 
     def nutrition_text(self, items):
@@ -344,7 +354,9 @@ class App(ctk.CTk):
         if kcal["missing"] == len(items):
             text = "热量待补充（尚无可计算的数据）"
         else:
-            text = f"已匹配部分约 {kcal['value']:.0f} kcal（份量估计 {kcal['low']:.0f}–{kcal['high']:.0f}）"
+            text = f"记录合计约 {kcal['value']:.0f} kcal（估计范围 {kcal['low']:.0f}–{kcal['high']:.0f}）"
+            estimates = sum(i.get("source_kind") in ("estimate", "reference_estimate") or bool(i.get("estimated_nutrients")) for i in items)
+            text += f" · {estimates} 项含估算" if estimates else " · 数据库/标签数据"
         if 0 < kcal["missing"] < len(items):
             text += f"；{kcal['missing']} 项热量待补充"
         for key, label in [("protein", "蛋白质"), ("fat", "脂肪"), ("carbs", "碳水"), ("fiber", "纤维"), ("sodium", "钠")]:
@@ -393,13 +405,34 @@ class App(ctk.CTk):
                 self.show("meal")
             else:
                 self.status.configure(text="饮食识别已完成，请到饮食记录核对并保存")
-        self.run_job(lambda: ai.analyze_meal(key, text, image, self.catalog), done)
+        self.run_job(lambda: ai.analyze_meal(key, text, image, self.catalog, self.products), done)
 
     def remove_item(self, idx):
         if self.busy:
             return
         self.draft.pop(idx)
         self.show("meal")
+
+    def fill_nutrition(self):
+        self.capture_meal()
+        if not self.key:
+            messagebox.showinfo("填写 API Key", "请先在设置中填写 DeepSeek API Key。", parent=self)
+            return
+        if not self.draft:
+            return
+        from .meal_analysis import fill_saved
+        original = copy.deepcopy(self.draft)
+        original_text = self.meal_text
+        key = self.key
+        def done(result):
+            self.capture_meal()
+            if self.draft != original or self.meal_text != original_text:
+                self.status.configure(text="草稿已经变化，补算结果未应用，请重新补算")
+                return
+            self.draft, self.meal_notes = result
+            self.show("meal", capture=False)
+            self.status.configure(text="缺失营养已补算，请核对并点击“确认并保存这一餐”")
+        self.run_job(lambda: fill_saved(key, original, self.catalog, self.products), done)
 
     def new_meal(self):
         if self.busy:
@@ -447,10 +480,13 @@ class App(ctk.CTk):
         self.label(body, "选择相同食物与生熟状态", 19, bold=True).pack(anchor="w", pady=(8, 10))
         searchrow = ctk.CTkFrame(body, fg_color="transparent")
         searchrow.pack(fill="x")
-        query = self.entry(searchrow, "中文常见食物 / 英文关键词", width=460)
+        query = self.entry(searchrow, "中文食物 / 英文关键词 / 商品条码", width=420)
         query.pack(side="left", padx=(0, 10))
         matches = tk.Listbox(body, height=6, font=(FONT, 11), bg=WHITE, fg=INK, exportselection=False, activestyle="none")
-        selected = {"id": item.get("food_id", ""), "source": item.get("source", "用户标签 / 手动录入")}
+        selected = {"id": item.get("food_id", ""), "source": item.get("source", "用户标签 / 手动录入"),
+                    "source_kind": item.get("source_kind", "user_label"), "source_url": item.get("source_url", ""),
+                    "per100_low": item.get("per100_low"), "per100_high": item.get("per100_high"),
+                    "estimated_nutrients": item.get("estimated_nutrients", []), "estimate_reason": item.get("estimate_reason", "")}
         found = []
         def search():
             found[:] = self.catalog.search(query.get(), 100)
@@ -460,25 +496,30 @@ class App(ctk.CTk):
         self.button(searchrow, "搜索", search, True, width=90).pack(side="left")
         query.bind("<Return>", lambda e: search())
         matches.pack(fill="x", pady=(8, 6))
-        self.label(body, "中文索引覆盖常见食材，其余可用英文查找。选择后自动填入每100g营养。", 11, MUTED).pack(anchor="w")
+        self.label(body, "数据库离线搜索；条码查询 Open Food Facts 公开标签，只发送条码。", 11, MUTED).pack(anchor="w")
         name = self.entry(body, "食物名称", item.get("name", ""), width=650)
         name.pack(anchor="w", pady=12)
         gramsrow = ctk.CTkFrame(body, fg_color="transparent")
         gramsrow.pack(fill="x")
         entries = {}
-        for key, label in [("grams", "份量 g"), ("grams_low", "估计下界 g"), ("grams_high", "估计上界 g")]:
+        for key, label in [("grams", "数量"), ("grams_low", "估计下界"), ("grams_high", "估计上界")]:
             col = ctk.CTkFrame(gramsrow, fg_color="transparent")
             col.pack(side="left", padx=(0, 14))
             self.label(col, label, 12, MUTED).pack(anchor="w")
             entries[key] = self.entry(col, value=item.get(key, "100"), width=150)
             entries[key].pack(pady=5)
+        unit = ctk.CTkOptionMenu(body, values=["g", "ml"], fg_color=TEAL, button_color=TEAL, width=100, font=(FONT, 12))
+        unit.set(item.get("unit", "g"))
+        unit.pack(anchor="w", pady=5)
         source_label = self.label(body, selected["source"], 11, MUTED, wraplength=680)
         source_label.pack(anchor="w", pady=8)
-        self.label(body, "每 100 g 营养值（空白表示未知；包装标签可覆盖）", 13, bold=True).pack(anchor="w", pady=(5, 8))
+        basis = self.label(body, f"每 100 {unit.get()} 营养值（空白表示未知；包装标签可覆盖）", 13, bold=True)
+        basis.pack(anchor="w", pady=(5, 8))
+        unit.configure(command=lambda value: basis.configure(text=f"每 100 {value} 营养值（空白表示未知）"))
         grid = ctk.CTkFrame(body, fg_color="transparent")
         grid.pack(fill="x")
         nutrition = {}
-        original = {"per100": item.get("per100")}
+        original = {"per100": item.get("per100"), "unit": item.get("unit", "g")}
         labels = {"kcal": "热量 kcal", "protein": "蛋白质 g", "fat": "脂肪 g", "carbs": "碳水 g", "fiber": "纤维 g", "sodium": "钠 mg"}
         for col, n in enumerate(NUTRIENTS):
             row, column = divmod(col, 3)
@@ -493,7 +534,12 @@ class App(ctk.CTk):
                 return
             food = found[matches.curselection()[0]]
             selected["id"], selected["source"] = food["id"], "USDA SR Legacy · FDC " + food["id"]
+            selected.update(source_kind="database", source_url=f"https://fdc.nal.usda.gov/food-details/{food['id']}/nutrients",
+                            per100_low=None, per100_high=None, estimated_nutrients=[], estimate_reason="")
             original["per100"] = food["per100"]
+            original["unit"] = "g"
+            unit.set("g")
+            basis.configure(text="每 100 g 营养值（空白表示未知）")
             name.delete(0, "end")
             name.insert(0, self.catalog.display(food))
             source_label.configure(text=selected["source"])
@@ -502,16 +548,47 @@ class App(ctk.CTk):
                 if food["per100"].get(n) is not None:
                     e.insert(0, str(food["per100"][n]))
         matches.bind("<<ListboxSelect>>", choose)
+        def lookup_product():
+            from .products import valid_barcode
+            code = query.get().strip()
+            if not valid_barcode(code):
+                messagebox.showinfo("商品条码", "在搜索框填写包装上的完整商品条码（8/12/13/14位，含校验位）。", parent=win)
+                return
+            def done(product):
+                if not win.winfo_exists():
+                    return
+                if not product:
+                    messagebox.showinfo("未找到标签", "公开商品库没有可用标签，可使用智能估算或手动填写包装数据。", parent=win)
+                    return
+                selected.update(id="OFF:" + product["code"], source="公开商品标签 · Open Food Facts（社区收录）",
+                                source_kind="product_label", source_url=product["source_url"],
+                                per100_low=None, per100_high=None, estimated_nutrients=[], estimate_reason="")
+                original.update(per100=product["per100"], unit=product["unit"])
+                name.delete(0, "end")
+                name.insert(0, product["brands"] + " " + product["name"])
+                unit.set(product["unit"])
+                basis.configure(text=f"每 100 {unit.get()} 营养值（空白表示未知）")
+                source_label.configure(text=selected["source"] + " · " + product["quantity"])
+                for n, entry in nutrition.items():
+                    entry.delete(0, "end")
+                    if product["per100"][n] is not None:
+                        entry.insert(0, str(product["per100"][n]))
+            self.run_job(lambda: self.products.barcode(code), done)
+        self.button(searchrow, "查商品标签", lookup_product, True, width=110).pack(side="left", padx=8)
         def save():
             try:
-                per100 = {n: None if not e.get().strip() else number(e.get(), 0, 100000 if n == "sodium" else 1000, labels[n]) for n, e in nutrition.items()}
+                from .domain import nutrient_limit
+                per100 = {n: None if not e.get().strip() else number(e.get(), 0, nutrient_limit(n), labels[n]) for n, e in nutrition.items()}
                 source = selected["source"]
                 fid = selected["id"]
-                if per100 != original["per100"]:
+                metadata = {k: selected[k] for k in ("source_kind", "source_url", "per100_low", "per100_high", "estimated_nutrients", "estimate_reason")}
+                if per100 != original["per100"] or unit.get() != original["unit"]:
                     source, fid = "用户标签 / 手动录入", ""
+                    metadata = {"source_kind": "user_label"}
                 from .domain import validate_item
                 clean = validate_item({"name": name.get(), **{k: v.get() for k, v in entries.items()},
-                                       "per100": per100, "source": source, "food_id": fid, "confidence": "用户已核对"})
+                                       "per100": per100, "source": source, "food_id": fid, "unit": unit.get(),
+                                       **metadata, "confidence": "用户已核对"})
                 if idx is None:
                     self.draft.append(clean)
                 else:
@@ -531,7 +608,7 @@ class App(ctk.CTk):
             row = {k: v for k, v in r.items() if k != "id"}
             if row["kind"] == "meal":
                 row["nutrition"] = totals(row["items"])
-                row["items"] = [{k: i[k] for k in ("name", "grams", "grams_low", "grams_high", "source")} for i in row["items"]]
+                row["items"] = [{k: i.get(k) for k in ("name", "grams", "unit", "grams_low", "grams_high", "source", "source_kind", "estimated_nutrients")} for i in row["items"]]
             sanitized.append(row)
         return {"period_start": (date.today()-timedelta(days=13)).isoformat(), "period_end": date.today().isoformat(),
                 "coverage_days": coverage, "total_records": len(rows), "included_records": len(sanitized),
@@ -608,6 +685,15 @@ class App(ctk.CTk):
             tools.pack(anchor="w", padx=16, pady=(0, 12))
             self.button(tools, "修改", lambda: self.edit_record(row), True, width=80).pack(side="left", padx=(0, 8))
             self.button(tools, "删除", lambda: self.delete_record(row), True, width=80).pack(side="left")
+            if row["kind"] == "meal" and any(not i.get("per100") or any(i["per100"].get(n) is None for n in ("kcal", "protein", "fat", "carbs")) for i in row["items"]):
+                self.button(tools, "补算缺失营养", lambda: self.open_and_fill(row), True, width=150).pack(side="left", padx=8)
+
+    def open_and_fill(self, row):
+        if self.busy:
+            return
+        self.edit_record(row)
+        if self.page == "meal" and self.meal_id == row["id"]:
+            self.fill_nutrition()
 
     def render_history(self):
         bar = ctk.CTkFrame(self.body, fg_color="transparent")
@@ -646,6 +732,9 @@ class App(ctk.CTk):
             self.render_log(row)
 
     def delete_record(self, row):
+        if self.busy:
+            messagebox.showinfo("正在处理", "请等待当前分析结束后删除记录。", parent=self)
+            return
         if messagebox.askyesno("删除记录", f"删除 {row['day']} 的这条{LABELS[row['kind']]}记录？此操作无法撤销。", parent=self):
             self.store.delete(row["id"])
             self.latest_advice = None

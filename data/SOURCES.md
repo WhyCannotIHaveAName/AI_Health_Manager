@@ -20,3 +20,9 @@ python scripts/build_food_data.py path/to/usda.zip data/foods.json
 ```
 
 重建器会保留原始档案的 SHA-256。更新数据集时需要同时复核中文别名和相关计算测试。
+
+## 在线商品标签（单独来源）
+
+Open Food Facts：https://world.openfoodfacts.org/ ，接口文档：https://openfoodfacts.github.io/documentation/docs/Product-Opener/api/ 。数据许可ODbL-1.0，单项内容DbCL-1.0。应用仅在线查询用户指定品牌或条码的标签片段，并保留商品链接与来源；不将其写入本目录的CC0数据库。查询使用兼容v2接口，遵守产品15次/分钟、搜索10次/分钟限制，并提供User-Agent归属。
+
+公开社区数据可能有录入、口味、地区或规格差异；UI明确注明来源，需要核对实际包装。商品标签查询失败时可以使用明确标注的智能估算。智能估算是模型输出，不属于USDA或Open Food Facts数据。
