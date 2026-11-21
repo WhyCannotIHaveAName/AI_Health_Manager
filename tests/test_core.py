@@ -129,6 +129,30 @@ class FakeOpener:
 
 
 class AITests(unittest.TestCase):
+    def test_missing_tls_material_has_specific_error(self):
+        opener = FakeOpener(error=FileNotFoundError(2, 'private-file-path'))
+        with self.assertRaises(ai.AIError) as result:
+            ai.request_json('sk-unit-test', 'json', 'test', opener)
+        self.assertIn('HTTPS', str(result.exception))
+        self.assertNotIn('private-file-path', str(result.exception))
+
+    def test_socket_oserror_has_network_error_not_disk_error(self):
+        with self.assertRaises(ai.AIError) as result:
+            ai.request_json('sk-unit-test', 'json', 'test', FakeOpener(error=OSError(10054, 'private-error')))
+        self.assertIn('10054', str(result.exception))
+        self.assertNotIn('private-error', str(result.exception))
+
+    def test_safe_diagnostics_exclude_exception_message(self):
+        from health_manager.diagnostics import describe_error
+        try:
+            raise OSError(2, 'sk-private-key and private health data')
+        except OSError as error:
+            result = describe_error(error)
+        serialized = json.dumps(result)
+        self.assertEqual(result['errno'], 2)
+        self.assertNotIn('private', serialized)
+        self.assertIn('test_core.py', serialized)
+
     def test_official_endpoint_json_contract(self):
         opener = FakeOpener({'choices': [{'finish_reason': 'stop', 'message': {'content': '{"ok":true}'}}]})
         self.assertEqual(ai.request_json('sk-unit-test', 'json', 'test', opener), {'ok': True})

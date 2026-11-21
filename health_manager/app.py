@@ -135,6 +135,8 @@ class App(ctk.CTk):
         getattr(self, "render_" + page)()
 
     def error(self, error):
+        from .diagnostics import write_error
+        write_error(self.data_dir / "last-error.json", error)
         # Never display raw network responses or keys.
         if isinstance(error, (ai.AIError, ValueError)):
             message = str(error)

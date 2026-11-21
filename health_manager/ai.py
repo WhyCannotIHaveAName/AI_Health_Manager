@@ -57,6 +57,12 @@ def request_json(key, system, user, opener=None):
         raise AIError(messages.get(error.code, f"DeepSeek 服务暂不可用（HTTP {error.code}）")) from None
     except (socket.timeout, TimeoutError, urllib.error.URLError):
         raise AIError("连接超时或网络不可用，记录仍保存在本机；可稍后重试") from None
+    except FileNotFoundError:
+        raise AIError("HTTPS 初始化缺少程序文件，请更新或重新安装应用。密钥和健康记录不受影响。") from None
+    except OSError as error:
+        code = getattr(error, "winerror", None) or error.errno
+        suffix = f"（系统代码 {code}）" if isinstance(code, int) else ""
+        raise AIError("HTTPS 连接失败，请检查网络或代理设置" + suffix) from None
     except (ValueError, KeyError, IndexError, TypeError):
         raise AIError("AI 回复格式不完整，请重试或手动输入") from None
 

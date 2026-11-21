@@ -8,3 +8,5 @@ userdata/
 *.db*
 *.secret
 *.log
+diagnostics.json
+last-error.json

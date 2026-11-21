@@ -9,7 +9,10 @@ if getattr(sys, "frozen", False):
     os.environ["TCL_LIBRARY"] = "_internal/_tcl_data"
     os.environ["TK_LIBRARY"] = "_internal/_tk_data"
 
-from health_manager.app import main
-
 if __name__ == "__main__":
-    main()
+    if "--diagnose" in sys.argv:
+        from health_manager.diagnostics import run
+        run(Path.cwd() / "diagnostics.json")
+    else:
+        from health_manager.app import main
+        main()

@@ -51,6 +51,8 @@ python -m venv .venv
 
 Windows 工作流执行测试并上传可下载的构建目录。目标平台为 Win10/Win11 x64；本机 Win10 已验证，Win11 待独立设备验收。首版未签名。真实付费 API 与餐食识别准确率尚未完成实测，接口契约和异常路径已用模拟响应验证。
 
+构建还会运行独立 exe 的 TLS、密钥加密和网络诊断。网络检查仅向官方接口发送虚构的无效密钥，预期收到401，不读取用户密钥或健康数据。`AIHealthManager.exe --diagnose` 可手动重复检查，结果写入同目录的 `diagnostics.json`。界面错误的本地诊断为 `userdata/last-error.json`（普通模式在数据目录），只包含异常类型、数字错误码和代码位置，不包含错误原文、密钥或健康内容。
+
 ## 数据与接口来源
 
 - [USDA FoodData Central 下载](https://fdc.nal.usda.gov/download-datasets/)：SR Legacy April 2018，CC0。完整归属和重建方式见 [数据说明](data/SOURCES.md)。
